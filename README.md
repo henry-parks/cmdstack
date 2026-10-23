@@ -1,8 +1,10 @@
 # cmdstack
 
-Turn a large export of process command lines into a short report you can read in one sitting, on your own machine.
-Lines that do the same thing (the same tool with different users, paths, IDs or addresses) become one group, the
-rarest activity comes first, and a rerun next week shows what is new. Nothing leaves the machine.
+Group millions of process command lines into a few hundred behaviors, ranked rarest first, on your own machine.
+
+Give cmdstack a week of process execution events (Sysmon event 1, Security event 4688 or an EDR export). Lines that
+differ only in user names, paths, IDs or addresses collapse into one group, the groups are ordered by how few machines
+ran them, and a rerun next week flags what is new or has spread. Nothing leaves the machine.
 
 The method and its measurements are in [Making Sense of 1.6 Million Process Execution Events, Part 1](https://henryparks.com/research/clustering-command-lines-locally/),
 and the notebook that reruns them is in [research-notebooks](https://github.com/henry-parks/research-notebooks/tree/clustering-command-lines-locally-v1.0/posts/clustering-command-lines-locally).
@@ -65,10 +67,28 @@ the 649 attack lines.
 
 ## How it works
 
-cmdstack normalizes each distinct line (user names, addresses, IDs and temp paths become placeholders), embeds each
-unique result with a small local model (all-MiniLM-L6-v2), groups them with HDBSCAN and picks up to eight example
-lines per group. The work grows with distinct lines, not events: OpTC's 1.6 million events (39,499 distinct lines)
-take about 90 seconds on a laptop processor.
+1. **Normalize.** Regex rules replace high-cardinality, low-information tokens (user names, IPv4 and IPv6
+   addresses, GUIDs, SIDs, ports, hashes, hex, long numbers, temp paths) with typed placeholders. Obfuscation
+   (non-ASCII, Unicode tricks, whitespace padding, carets, base64) is kept as separate features rather than
+   scrubbed, and base64 is decoded.
+2. **Embed.** Each unique normalized line is encoded with all-MiniLM-L6-v2, a 22M-parameter sentence transformer,
+   into a 384-dimensional unit vector, so a dot product is cosine similarity. Cost scales with unique normalized
+   lines, not events, and vectors are cached by content hash.
+3. **Cluster.** PCA projects the vectors to 30 dimensions, then HDBSCAN (`fast_hdbscan`, `min_cluster_size=5`,
+   `min_samples=3`) finds density-based clusters without a preset k and labels low-density points as noise, which
+   the report lists separately. Each normalized line contributes one point per distinct raw variant, capped at 5,
+   so common behaviors stay dense while the point count stays bounded. On OpTC this scores an adjusted Rand index
+   of 0.94 against the normalized behavior templates (0.89 for scikit-learn HDBSCAN on all 384 dimensions, as in
+   the post) and clusters 100,000 points in 13 seconds.
+4. **Pick representatives.** Up to eight lines per cluster from three samplers: random, farthest-first traversal
+   for coverage, and maximal marginal relevance (weight 0.7) for typical but non-redundant lines.
+5. **Rank and compare.** Clusters are sorted by host count, then event count, fewest first. Each cluster's centroid
+   is saved, and the next run matches clusters to it at cosine similarity 0.93 or higher; a cluster whose
+   normalized lines were at least 80% seen before also counts as known. A known cluster whose host count at least
+   doubles (and grows by 5 or more) is marked changed. `cmdstack search` ranks every normalized line by cosine
+   similarity to the query.
+
+OpTC's 1.6 million events (39,499 distinct lines) take about 90 seconds on a laptop processor.
 
 ## Limits
 
@@ -78,8 +98,9 @@ take about 90 seconds on a laptop processor.
 
 ## Faster on a GPU
 
-Embedding is the slow step, and an NVIDIA GPU speeds it up several-fold: OpTC takes about 18 seconds instead of 90,
-and 3.6 million distinct lines take about 2 minutes. cmdstack uses the GPU automatically when PyTorch can see one.
+Embedding is the slow step, and an NVIDIA GPU makes it about five times faster. The OpTC run (1.6 million events)
+drops from about 90 seconds on a laptop processor to about 18 seconds, and a larger export of 3.6 million distinct
+lines takes about 2 minutes. cmdstack uses the GPU automatically when PyTorch can see one.
 The PyTorch that pip installs on Windows is CPU-only, so install a CUDA build first, using the command for your
 system from [pytorch.org](https://pytorch.org/get-started/locally/), then install cmdstack:
 
