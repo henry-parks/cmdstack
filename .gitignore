@@ -1,0 +1,13 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+cmdstack-out/
+example-out/
+*.npy
+hunts/
+_ex/
+examples/hunts/
+build/
+dist/
+tests/
